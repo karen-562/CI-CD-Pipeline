@@ -1,0 +1,79 @@
+pipeline {
+    agent any
+
+    environment {
+        MAVEN_HOME   = tool name: 'Maven3', type: 'maven'
+        SONARQUBE    = 'SonarQubeServer'   // Jenkins SonarQube server config name
+        DOCKER_REG   = 'dockerhub'         // Jenkins credentials ID for DockerHub/Nexus
+        DOCKER_IMG   = "your-dockerhub-username/ci-cd-app"
+        KUBE_CONFIG  = credentials('kubeconfig') // Jenkins credentials for kubeconfig
+        NEXUS_REPO   = 'nexus-repo'        // Nexus repository ID (if using Nexus)
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                git branch: 'main', url: 'https://github.com/your-username/ci-cd-pipeline.git'
+            }
+        }
+
+        stage('Build with Maven') {
+            steps {
+                sh "${MAVEN_HOME}/bin/mvn clean package -DskipTests"
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            environment {
+                PATH = "${MAVEN_HOME}/bin:${env.PATH}"
+            }
+            steps {
+                withSonarQubeEnv("${SONARQUBE}") {
+                    sh "mvn sonar:sonar"
+                }
+            }
+        }
+
+        stage('Upload Artifact to Nexus') {
+            steps {
+                sh "${MAVEN_HOME}/bin/mvn deploy"
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                script {
+                    sh """
+                    docker build -t ${DOCKER_IMG}:${BUILD_NUMBER} .
+                    echo ${DOCKER_REG_PSW} | docker login -u ${DOCKER_REG_USR} --password-stdin
+                    docker push ${DOCKER_IMG}:${BUILD_NUMBER}
+                    docker tag ${DOCKER_IMG}:${BUILD_NUMBER} ${DOCKER_IMG}:latest
+                    docker push ${DOCKER_IMG}:latest
+                    """
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE')]) {
+                    sh """
+                    export KUBECONFIG=$KUBECONFIG_FILE
+                    kubectl apply -f k8s/deployment.yaml
+                    kubectl apply -f k8s/service.yaml
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Pipeline executed successfully!"
+        }
+        failure {
+            echo "❌ Pipeline failed. Check logs for details."
+        }
+    }
+}
